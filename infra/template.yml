@@ -1,0 +1,190 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: HygieneBot — full pipeline (scanner + Slack approval + deletion)
+
+# ── Parameters ────────────────────────────────────────────────────────────────
+Parameters:
+  SlackWebhookUrl:
+    Type: String
+    NoEcho: true
+    Description: Slack incoming webhook URL for the weekly report
+
+  SlackSigningSecret:
+    Type: String
+    NoEcho: true
+    Description: Slack app signing secret (used to verify approval callbacks)
+
+  AllowedApproverIds:
+    Type: String
+    Description: "Comma-separated Slack user IDs authorised to approve deletions"
+    Default: ""
+
+  SnapshotAgeDays:
+    Type: Number
+    Default: 90
+
+  CpuLookbackDays:
+    Type: Number
+    Default: 7
+
+  CpuThreshold:
+    Type: Number
+    Default: 1
+
+
+# ── Globals ───────────────────────────────────────────────────────────────────
+Globals:
+  Function:
+    Runtime: python3.12
+    Timeout: 300
+    MemorySize: 256
+
+
+# ── Resources ─────────────────────────────────────────────────────────────────
+Resources:
+
+  # ── IAM: Scanner role (read-only) ─────────────────────────────────────────
+  ScannerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: HygieneBotScannerRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: {Service: lambda.amazonaws.com}
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: ScanOnly
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: EC2ReadOnly
+                Effect: Allow
+                Action:
+                  - ec2:DescribeVolumes
+                  - ec2:DescribeInstances
+                  - ec2:DescribeSnapshots
+                Resource: "*"
+              - Sid: CWMetrics
+                Effect: Allow
+                Action: cloudwatch:GetMetricStatistics
+                Resource: "*"
+              - Sid: STS
+                Effect: Allow
+                Action: sts:GetCallerIdentity
+                Resource: "*"
+
+  # ── IAM: Deletion role (targeted deletes only) ────────────────────────────
+  DeletionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: HygieneBotDeletionRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: {Service: lambda.amazonaws.com}
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: TargetedDelete
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: DeleteEC2Resources
+                Effect: Allow
+                Action:
+                  - ec2:DeleteVolume
+                  - ec2:DeleteSnapshot
+                  - ec2:StopInstances
+                Resource: "*"
+
+  # ── Lambda: Scanner ────────────────────────────────────────────────────────
+  ScannerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: hygienebot-scanner
+      Description: "Scans for zombie AWS resources; posts interactive Slack report"
+      CodeUri: ./
+      Handler: lambda_scanner.lambda_handler
+      Role: !GetAtt ScannerRole.Arn
+      Environment:
+        Variables:
+          SLACK_WEBHOOK_URL: !Ref SlackWebhookUrl
+          SNAPSHOT_AGE_DAYS: !Ref SnapshotAgeDays
+          CPU_LOOKBACK_DAYS: !Ref CpuLookbackDays
+          CPU_THRESHOLD:     !Ref CpuThreshold
+      Events:
+        WeeklySchedule:
+          Type: Schedule
+          Properties:
+            Name: HygieneBotWeeklyTrigger
+            Description: "Run HygieneBot every Friday at 09:00 UTC"
+            Schedule: cron(0 9 ? * FRI *)
+            Enabled: true
+
+  ScannerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${ScannerFunction}"
+      RetentionInDays: 30
+
+  # ── Lambda: Deletion ───────────────────────────────────────────────────────
+  DeletionFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: hygienebot-deletion
+      Description: "Handles Slack approval callbacks; deletes approved resources"
+      CodeUri: ./
+      Handler: lambda_deletion.lambda_handler
+      Role: !GetAtt DeletionRole.Arn
+      Environment:
+        Variables:
+          SLACK_SIGNING_SECRET: !Ref SlackSigningSecret
+          ALLOWED_APPROVER_IDS: !Ref AllowedApproverIds
+      Events:
+        ApprovalApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApprovalApi
+            Path: /approve
+            Method: POST
+
+  DeletionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${DeletionFunction}"
+      RetentionInDays: 30
+
+  # ── API Gateway ────────────────────────────────────────────────────────────
+  ApprovalApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: hygienebot-approval-api
+      StageName: prod
+      Description: "Receives Slack interactive button callbacks"
+      MethodSettings:
+        - ResourcePath: "/*"
+          HttpMethod:   "*"
+          ThrottlingBurstLimit: 20
+          ThrottlingRateLimit:  10
+
+
+# ── Outputs ───────────────────────────────────────────────────────────────────
+Outputs:
+  ScannerFunctionArn:
+    Value: !GetAtt ScannerFunction.Arn
+
+  DeletionFunctionArn:
+    Value: !GetAtt DeletionFunction.Arn
+
+  ApprovalEndpointUrl:
+    Description: "Paste this into Slack app > Interactivity & Shortcuts > Request URL"
+    Value: !Sub "https://${ApprovalApi}.execute-api.${AWS::Region}.amazonaws.com/prod/approve"
+
+  EventBridgeRule:
+    Value: HygieneBotWeeklyTrigger
