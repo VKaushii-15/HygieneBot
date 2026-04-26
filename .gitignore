@@ -7,3 +7,7 @@ terraform.tfstate.backup
 *.zip
 __pycache__/
 .DS_Store
+
+# MLflow
+mlruns/
+mlartifacts/

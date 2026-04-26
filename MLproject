@@ -1,0 +1,19 @@
+name: HygieneBot
+
+python_env: python_env.yaml
+
+entry_points:
+
+  # ── Run a scan experiment with custom thresholds ─────────────────────────
+  scan:
+    parameters:
+      snapshot_age_days: {type: int, default: 90}
+      cpu_lookback_days: {type: int, default: 7}
+      cpu_threshold:     {type: float, default: 1.0}
+      dry_run:           {type: int, default: 1}
+    command: >
+      python mlflow_tracking.py
+        --snapshot-age-days {snapshot_age_days}
+        --cpu-lookback-days {cpu_lookback_days}
+        --cpu-threshold {cpu_threshold}
+        --dry-run {dry_run}
