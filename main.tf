@@ -16,7 +16,7 @@ resource "aws_sqs_queue" "zombie_queue" {
 resource "aws_iam_role" "scanner_lambda_role" {
   name = "HygieneBotScannerRole"
   assume_role_policy = jsonencode({
-    Version = "2012-10-17"
+    Version   = "2012-10-17"
     Statement = [{ Action = "sts:AssumeRole", Effect = "Allow", Principal = { Service = "lambda.amazonaws.com" } }]
   })
 }
@@ -37,8 +37,8 @@ resource "aws_iam_role_policy" "scanner_policy" {
         Resource = "*"
       },
       {
-        Action = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]
-        Effect = "Allow"
+        Action   = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]
+        Effect   = "Allow"
         Resource = "*"
       }
     ]
@@ -48,7 +48,7 @@ resource "aws_iam_role_policy" "scanner_policy" {
 resource "aws_iam_role" "deleter_lambda_role" {
   name = "HygieneBotDeleterRole"
   assume_role_policy = jsonencode({
-    Version = "2012-10-17"
+    Version   = "2012-10-17"
     Statement = [{ Action = "sts:AssumeRole", Effect = "Allow", Principal = { Service = "lambda.amazonaws.com" } }]
   })
 }
@@ -61,7 +61,7 @@ resource "aws_iam_role_policy" "deleter_policy" {
     Statement = [
       {
         Action = [
-          "ec2:TerminateInstances", "ec2:StopInstances", "ec2:DeleteVolume", "ec2:DeleteSnapshot", 
+          "ec2:TerminateInstances", "ec2:StopInstances", "ec2:DeleteVolume", "ec2:DeleteSnapshot",
           "secretsmanager:GetSecretValue",
           "sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:GetQueueAttributes",
           "cloudwatch:PutMetricData"
@@ -70,8 +70,8 @@ resource "aws_iam_role_policy" "deleter_policy" {
         Resource = "*"
       },
       {
-        Action = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]
-        Effect = "Allow"
+        Action   = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]
+        Effect   = "Allow"
         Resource = "*"
       }
     ]
@@ -88,12 +88,12 @@ data "archive_file" "lambda_zip" {
 }
 
 resource "aws_lambda_function" "scanner_lambda" {
-  filename         = data.archive_file.lambda_zip.output_path
-  function_name    = "HygieneBotScanner"
-  role             = aws_iam_role.scanner_lambda_role.arn
-  handler          = "scanner_lambda.lambda_handler"
-  runtime          = "python3.11"
-  timeout          = 300
+  filename      = data.archive_file.lambda_zip.output_path
+  function_name = "HygieneBotScanner"
+  role          = aws_iam_role.scanner_lambda_role.arn
+  handler       = "scanner_lambda.lambda_handler"
+  runtime       = "python3.11"
+  timeout       = 300
 
   environment {
     variables = {
@@ -104,12 +104,12 @@ resource "aws_lambda_function" "scanner_lambda" {
 }
 
 resource "aws_lambda_function" "deleter_lambda" {
-  filename         = "deleter_lambda.zip" # Assuming code exists
-  function_name    = "HygieneBotDeleter"
-  role             = aws_iam_role.deleter_lambda_role.arn
-  handler          = "deleter_lambda.lambda_handler"
-  runtime          = "python3.11"
-  timeout          = 60
+  filename      = "deleter_lambda.zip" # Assuming code exists
+  function_name = "HygieneBotDeleter"
+  role          = aws_iam_role.deleter_lambda_role.arn
+  handler       = "deleter_lambda.lambda_handler"
+  runtime       = "python3.11"
+  timeout       = 60
 
   environment {
     variables = {

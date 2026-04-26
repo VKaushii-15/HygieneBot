@@ -31,8 +31,10 @@ pipeline {
         stage('Lint Python') {
             steps {
                 sh '''
+                    export PATH="$HOME/.local/bin:$PATH"
+
                     echo "── Installing linting tools ──"
-                    pip install --quiet flake8 pylint
+                    python3 -m pip install --quiet flake8 pylint
 
                     echo "── Flake8 ──"
                     flake8 --max-line-length=120 --statistics \
