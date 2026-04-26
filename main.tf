@@ -30,7 +30,7 @@ resource "aws_iam_role_policy" "scanner_policy" {
       {
         Action = [
           "ec2:DescribeInstances", "ec2:DescribeVolumes", "ec2:DescribeSnapshots", "ec2:DescribeTags",
-          "cloudwatch:GetMetricStatistics", "secretsmanager:GetSecretValue",
+          "cloudwatch:GetMetricStatistics", "cloudwatch:PutMetricData", "secretsmanager:GetSecretValue",
           "sqs:SendMessage"
         ]
         Effect   = "Allow"
@@ -61,9 +61,10 @@ resource "aws_iam_role_policy" "deleter_policy" {
     Statement = [
       {
         Action = [
-          "ec2:TerminateInstances", "ec2:DeleteVolume", "ec2:DeleteSnapshot", 
+          "ec2:TerminateInstances", "ec2:StopInstances", "ec2:DeleteVolume", "ec2:DeleteSnapshot", 
           "secretsmanager:GetSecretValue",
-          "sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:GetQueueAttributes"
+          "sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:GetQueueAttributes",
+          "cloudwatch:PutMetricData"
         ]
         Effect   = "Allow"
         Resource = "*"

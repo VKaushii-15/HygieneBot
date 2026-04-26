@@ -68,24 +68,10 @@ def find_untagged_resources():
                 untagged.append(instance['InstanceId'])
     return untagged
 
-def enqueue_items(batch_id, resource_type, resource_ids):
-    queue_url = os.environ.get('SQS_QUEUE_URL')
-    if not queue_url or not resource_ids:
-        return
-    # Note: For scale > 10,000, we should use sqs_client.send_message_batch (10 at a time)
-    # Shown individually for clarity.
-    for res_id in resource_ids:
-        message_body = {
-            "batch_id": batch_id,
-            "resource_type": resource_type,
-            "resource_id": res_id
-        }
-        sqs_client.send_message(
-            QueueUrl=queue_url,
-            MessageBody=json.dumps(message_body)
-        )
-
-def send_slack_notification(webhook_url, summary, batch_id):
+def send_slack_notification(webhook_url, summary, batch_id, options, total_savings):
+    if not options:
+        options = [{"text": {"type": "plain_text", "text": "No specific resources"}, "value": "none"}]
+    
     payload = {
         "blocks": [
             {
@@ -96,7 +82,7 @@ def send_slack_notification(webhook_url, summary, batch_id):
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": "*Found Zombies:*\n"
+                    "text": f"*Estimated Waste: ${total_savings:.2f} / month*\n\n"
                             f"• {summary['ebs']} Unattached EBS Volumes\n"
                             f"• {summary['ec2']} Idle EC2 Instances (0% CPU)\n"
                             f"• {summary['snapshots']} Old Snapshots (> 90 days)\n"
@@ -105,11 +91,24 @@ def send_slack_notification(webhook_url, summary, batch_id):
                 }
             },
             {
+                "type": "input",
+                "block_id": "selections_block",
+                "element": {
+                    "type": "checkboxes",
+                    "options": options,
+                    "action_id": "checkbox_selections"
+                },
+                "label": {
+                    "type": "plain_text",
+                    "text": "Select resources to clean up/stop:"
+                }
+            },
+            {
                 "type": "actions",
                 "elements": [
                     {
                         "type": "button",
-                        "text": {"type": "plain_text", "text": "Approve Cleanup"},
+                        "text": {"type": "plain_text", "text": "Approve Selected"},
                         "style": "danger",
                         "value": json.dumps({"batch_id": batch_id, "action": "approve"}),
                         "action_id": "approve_cleanup"
@@ -136,11 +135,25 @@ def lambda_handler(event, context):
     snapshots = find_old_snapshots()
     untagged = find_untagged_resources()
     
-    # Push to SQS for Deleter Lambda processing (Scalability)
-    enqueue_items(batch_id, "EBS", ebs)
-    enqueue_items(batch_id, "EC2", ec2)
-    enqueue_items(batch_id, "SNAPSHOT", snapshots)
-    enqueue_items(batch_id, "UNTAGGED", untagged)
+    options = []
+    total_savings = 0
+    seen = set()
+
+    def add_option(res_id, res_type, cost, label):
+        nonlocal total_savings
+        val = f"{res_type}|{res_id}"
+        if val not in seen and len(options) < 100:
+            seen.add(val)
+            total_savings += cost
+            options.append({
+                "text": {"type": "plain_text", "text": f"{label}: {res_id} (Save ${cost}/mo)"},
+                "value": val
+            })
+
+    for r in ebs: add_option(r, "EBS", 2.0, "EBS Vol")
+    for r in ec2: add_option(r, "EC2", 10.0, "Idle EC2")
+    for r in snapshots: add_option(r, "SNAPSHOT", 1.0, "Old Snap")
+    for r in untagged: add_option(r, "UNTAGGED", 10.0, "Untagged EC2")
     
     summary = {
         "ebs": len(ebs),
@@ -151,10 +164,21 @@ def lambda_handler(event, context):
     
     total = sum(summary.values())
     if total > 0:
+        try:
+            cloudwatch_client.put_metric_data(
+                Namespace='HygieneBot',
+                MetricData=[
+                    {'MetricName': 'ZombiesFound', 'Value': total, 'Unit': 'Count'},
+                    {'MetricName': 'EstimatedSavings', 'Value': total_savings, 'Unit': 'None'}
+                ]
+            )
+        except Exception as e:
+            logger.error(f"CW PutMetricData failed: {e}")
+
         slack_secret = get_secret(os.environ.get('SLACK_SECRET_ID', 'hygienebot/slack'))
         webhook_url = slack_secret.get('webhook_url')
         if webhook_url:
-            send_slack_notification(webhook_url, summary, batch_id)
+            send_slack_notification(webhook_url, summary, batch_id, options, total_savings)
             logger.info("Slack notification sent successfully.")
         else:
             logger.error("No Slack webhook URL configured.")

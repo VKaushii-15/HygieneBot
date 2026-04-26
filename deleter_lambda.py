@@ -42,51 +42,52 @@ def verify_slack_signature(headers, body, signing_secret):
     
     return hmac.compare_digest(my_sig, signature)
 
-def process_sqs_cleanup(batch_id):
-    queue_url = os.environ.get('SQS_QUEUE_URL')
-    while True:
-        response = sqs_client.receive_message(
-            QueueUrl=queue_url,
-            MaxNumberOfMessages=10,
-            WaitTimeSeconds=1  # Short poll for lambda processing
-        )
-        
-        messages = response.get('Messages', [])
-        if not messages:
-            break
-            
-        for msg in messages:
-            body = json.loads(msg['Body'])
-            # Verify batch ID matches the approved alert before deleting
-            if body.get('batch_id') == batch_id:
-                try:
-                    res_type = body.get('resource_type')
-                    res_id = body.get('resource_id')
-                    
-                    if res_type == 'EBS':
-                        ec2_client.delete_volume(VolumeId=res_id)
-                    elif res_type == 'EC2':
-                        ec2_client.terminate_instances(InstanceIds=[res_id])
-                    elif res_type == 'SNAPSHOT':
-                        ec2_client.delete_snapshot(SnapshotId=res_id)
-                    elif res_type == 'UNTAGGED':
-                        ec2_client.terminate_instances(InstanceIds=[res_id])
-                        
-                    # Delete the message after acting on it
-                    sqs_client.delete_message(
-                        QueueUrl=queue_url,
-                        ReceiptHandle=msg['ReceiptHandle']
-                    )
-                except Exception as e:
-                    logger.error(f"Failed to delete {body}: {str(e)}")
-                    # Move to DLQ or dead-letter handling in production
+def process_approved_selections(selected_options):
+    cleaned_up = 0
+    savings_realized = 0
 
-def clear_sqs(batch_id):
-    """If user denies, we clear the SQS queue of items from that batch."""
-    queue_url = os.environ.get('SQS_QUEUE_URL')
-    # Similarly pop from SQS but DO NOT delete AWS resources
-    # (Implementation omitted for brevity, would similarly consume messages)
-    pass
+    for opt in selected_options:
+        val = opt.get('value', '')
+        if not val or '|' not in val:
+            continue
+        if val == 'none':
+            continue
+            
+        res_type, res_id = val.split('|', 1)
+        
+        try:
+            if res_type == 'EBS':
+                ec2_client.delete_volume(VolumeId=res_id)
+                savings_realized += 2.0
+            elif res_type == 'EC2':
+                ec2_client.stop_instances(InstanceIds=[res_id])
+                savings_realized += 10.0
+            elif res_type == 'SNAPSHOT':
+                ec2_client.delete_snapshot(SnapshotId=res_id)
+                savings_realized += 1.0
+            elif res_type == 'UNTAGGED':
+                ec2_client.stop_instances(InstanceIds=[res_id])
+                savings_realized += 10.0
+                
+            cleaned_up += 1
+        except Exception as e:
+            logger.error(f"Failed to process {val}: {e}")
+            
+    # Push to CloudWatch
+    if cleaned_up > 0:
+        try:
+            cloudwatch_client = boto3.client('cloudwatch')
+            cloudwatch_client.put_metric_data(
+                Namespace='HygieneBot',
+                MetricData=[
+                    {'MetricName': 'ResourcesCleanedUp', 'Value': cleaned_up, 'Unit': 'Count'},
+                    {'MetricName': 'SavingsRealized', 'Value': savings_realized, 'Unit': 'None'}
+                ]
+            )
+        except Exception as e:
+            logger.error(f"CW PutMetricData failed: {e}")
+            
+    return cleaned_up, savings_realized
 
 def lambda_handler(event, context):
     headers = {k.lower(): v for k, v in event.get('headers', {}).items()}
@@ -113,11 +114,15 @@ def lambda_handler(event, context):
     logger.info(f"User {user_id} trigged action {user_action} for batch {batch_id}")
     
     if user_action == 'approve':
-        process_sqs_cleanup(batch_id)
-        msg = "Cleanup Approved and Execution Started. 🚀"
+        state_values = payload.get('state', {}).get('values', {})
+        selections_block = state_values.get('selections_block', {})
+        checkbox_selections = selections_block.get('checkbox_selections', {})
+        selected_options = checkbox_selections.get('selected_options', [])
+        
+        cleaned, savings = process_approved_selections(selected_options)
+        msg = f"Cleanup Approved! 🚀 Successfully processed {cleaned} resources. Realized Savings: ${savings:.2f}/mo."
     else:
-        clear_sqs(batch_id)
-        msg = "Cleanup Denied. Safely ignored. ❌"
+        msg = "Cleanup Denied by user. Safely ignored. ❌"
 
     return {
         "statusCode": 200,
